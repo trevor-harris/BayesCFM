@@ -1,24 +1,44 @@
 # bayes-cfm
 
+
 Bayesian Conditional Flow Matching (CFM) in PyTorch — UNet backbone, CFM training, **autodiff-based** Jacobian (Hutchinson) regularizers, SG-MCMC + Laplace posteriors, ODE samplers, and a comprehensive metrics suite.
 
+**Bayesian Conditional Flow Matching (CFM)** — a clean PyTorch package for:
+- A UNet backbone with class conditioning and multi-res attention
+- CFM training (OT paths) + autodiff gradient-field regularizers
+- SG-MCMC training (SGLD/SGHMC) and posterior sampling
+- Laplace approximation (last-layer & KFAC) for velocity fields
+- ODE samplers (RK4 / Dormand–Prince RK45)
+- A comprehensive **metrics** suite (FID/KID/IS, PRDC, per-class Intra-FID, rare-class PR/Coverage, NN-duplicates, Birthday test, cMS-SSIM, perceptual K-hit, LPIPS dispersion, MIA AUC, and more)
+
+---
+
 ## Install
+
 ```bash
+# from source (editable dev)
 pip install -e .
-pip install -e .[metrics]   # optional extras for LPIPS, MS-SSIM
+
+# optional extras for metrics
+pip install -e .[metrics]
 ```
 
 ## Quickstart
+
 ```python
 import torch
 from torch.utils.data import DataLoader, Dataset
 import bayescfm as bcfm
 
-model = bcfm.UNetCFM(in_channels=3, out_channels=3, model_channels=64,
-                     channel_mult=(1,2,2), num_res_blocks=1,
-                     attn_resolutions=(16,), num_heads=4,
-                     num_classes=10)
+# 1) Model
+model = bcfm.UNetCFM(
+    in_channels=3, out_channels=3, model_channels=64,
+    channel_mult=(1,2,2), num_res_blocks=1,
+    attn_resolutions=(16,), num_heads=4,
+    num_classes=10, class_dropout_prob=0.1,
+)
 
+# 2) Dummy data
 class WhiteNoise(Dataset):
     def __init__(self, n=512, shape=(3,32,32), seed=0):
         g = torch.Generator().manual_seed(seed)
@@ -29,29 +49,32 @@ class WhiteNoise(Dataset):
     def __getitem__(self, i): return self.x[i], self.y[i]
 
 loader = DataLoader(WhiteNoise(), batch_size=64, shuffle=True)
-ema = bcfm.train_cfm(model, loader, epochs=1, lr=2e-4, device="cuda" if torch.cuda.is_available() else "cpu")
-```
 
-### Regularized training (autodiff Jacobian penalties)
-```python
+# 3) Plain CFM training (OT path)
+ema_model = bcfm.train_cfm(model, loader, epochs=1, lr=2e-4, device="cuda" if torch.cuda.is_available() else "cpu")
+
+# 4) Regularized training (autodiff gradient-field penalties)
 ema_reg = bcfm.train_cgm(
     model, loader, epochs=1, lr=2e-4, device="cuda" if torch.cuda.is_available() else "cpu",
     lambda_curl=1e-4, lambda_mono=1e-4,
-    probes=2, probe_dist="rademacher",
-    normalize_probes=True, orthogonalize=True, normalize_curl=True,
-    penalty_train_flag=True,
-    pool_to=(64,64), enforce_stride=True,
+    probes=1,  pool_factor=None,
+     
+    probe_dist="rademacher", orthogonalize=True,
+    penalty_train_flag=False, normalize_curl=True,
 )
 ```
 
-### SG-MCMC Bayes + posterior sampling
+### SG-MCMC Bayes training + posterior sampling
+
 ```python
 ema_bayes, posterior = bcfm.train_cgm_bayes(
     model, loader, epochs=1, lr=2e-4, device="cuda" if torch.cuda.is_available() else "cpu",
     lambda_curl=1e-4, lambda_mono=1e-4,
-    probes=1, probe_dist="rademacher",
-    sgmcmc_enable=True, sgmcmc_alg="sghmc", sgmcmc_eta=2e-5, sgmcmc_friction=0.05,
-    sgmcmc_collect=True, sgmcmc_burnin_steps=10, sgmcmc_thin=5, sgmcmc_max_samples=10
+    probes=1, 
+    sgmcmc_enable=True, sgmcmc_alg="sghmc",
+    sgmcmc_eta=2e-5, sgmcmc_temperature=1.0, sgmcmc_friction=0.05,
+    sgmcmc_collect=True, sgmcmc_burnin_steps=10, sgmcmc_thin=5, sgmcmc_max_samples=10,
+    return_posterior=True,
 )
 
 x = torch.randn(4,3,32,32)
@@ -61,23 +84,70 @@ v_mean, v_var = bcfm.posterior_sampler(ema_bayes, posterior, x, t, y, n_samples=
 ```
 
 ### Laplace approximation
+
 ```python
-lap = bcfm.LaplaceCFM(model, approx="last_layer")
+lap = bcfm.LaplaceCFM(model, approx="kfac", layer_pattern="last")  # or approx="last_layer"
 lap.fit(loader, device="cuda" if torch.cuda.is_available() else "cpu")
 v_mean, v_std = lap.sample_velocity(x, t, y, n_samples=8, reduce="mean_std")
 ```
 
-### Metrics
+### ODE sampling
+
 ```python
-inc = bcfm.metrics.InceptionFeatures()
+z = torch.randn(4,3,32,32)
+y = torch.randint(0,10,(4,))
+t_grid, x_path = bcfm.sample_ode(ema_model, z, y=y, t0=0.0, t1=1.0, steps=50, method="rk45")
+```
+
+## Metrics
+
+```python
+inc = bcfm.metrics.InceptionFeatures()  # pool3 feats + probs
 # FID
 mu_r, sig_r, _ = bcfm.metrics.compute_dataset_stats_from_loader(real_loader, inc)
 mu_f, sig_f, _ = bcfm.metrics.compute_dataset_stats_from_loader(fake_loader, inc)
 fid = bcfm.metrics.fid_from_stats(mu_r, sig_r, mu_f, sig_f)
-# PRDC frontier
+
+# PRDC & frontier
 fr = inc(real_images)[0]; ff = inc(fake_images)[0]
-front = bcfm.metrics.prdc_frontier(fr, ff, ks=[1,3,5,10,20])
-# cMS-SSIM and K-hit
+pr = bcfm.metrics.prdc(fr, ff, k=5)
+frontier = bcfm.metrics.prdc_frontier(fr, ff, ks=[1,3,5,10,20])
+
+# Classwise
+intrafid = bcfm.metrics.intrafid_per_class(fr, labels_real, ff, labels_fake)
+rare = bcfm.metrics.rare_class_mask(labels_real, percentile=20.0)
+pr_rare = bcfm.metrics.pr_coverage_by_class(fr, labels_real, ff, labels_fake, k=5, only_classes=rare)
+
+# Dupes, birthday, LPIPS dispersion
+dup = bcfm.metrics.duplicate_rate(ff, threshold=0.1)
+birthday = bcfm.metrics.birthday_paradox_test(ff, subset=512, threshold=0.1, trials=5)
+disp = bcfm.metrics.lpips_dispersion(fake_images, max_pairs=2000, backend="vgg")
+
+# cMS-SSIM and perceptual K-hit
 cms = bcfm.metrics.cms_ssim_by_class(fake_images, fake_labels, pairs_per_class=500)
 k_hit = bcfm.metrics.perceptual_coverage_k(real_images, cand_images, threshold=0.5, backend="vgg")
 ```
+
+## Repo layout
+
+```text
+bayescfm/
+  model/        # UNet + ODE samplers
+  losses/       # CFM losses + FD regularizers
+  training/     # train_cfm, train_cgm, train_cgm_bayes
+  posterior/    # SG-MCMC posterior sampler, LaplaceCFM
+  metrics/      # FID/KID/IS, PRDC, classwise, LPIPS dispersion, cMS-SSIM, K-hit, MIA AUC...
+examples/
+  noise_smoke.py
+  metrics_demo.py
+  metrics_adv_demo.py
+  metrics_extra_demo.py
+```
+
+## Contributing
+
+PRs welcome! Please run `black`, `isort`, and `flake8` before submitting.
+
+## License
+
+MIT

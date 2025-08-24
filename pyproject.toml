@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bayes-cfm"
 version = "0.0.1"
-description = "Bayesian Conditional Flow Matching with autodiff-based Jacobian regularizers, UNet backbone, SG-MCMC & Laplace posteriors, ODE samplers, and metrics."
+description = "Bayesian Conditional Flow Matching: UNet backbone, CFM losses, FD regularizers, SG-MCMC & Laplace posterior approximations, ODE samplers, and comprehensive metrics."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{name = "Your Name"}]
@@ -27,8 +27,18 @@ dependencies = [
 metrics = [
   "lpips>=0.1.4",
   "pytorch-msssim>=1.0.0",
-  "scipy>=1.9",
 ]
+dev = [
+  "black",
+  "isort",
+  "flake8",
+  "mypy",
+  "pytest",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/bayes-cfm"
+Issues = "https://github.com/yourname/bayes-cfm/issues"
 
 [tool.setuptools.packages.find]
 where = ["./"]
