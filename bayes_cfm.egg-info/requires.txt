@@ -1,0 +1,14 @@
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.23
+
+[dev]
+black
+isort
+flake8
+mypy
+pytest
+
+[metrics]
+lpips>=0.1.4
+pytorch-msssim>=1.0.0
